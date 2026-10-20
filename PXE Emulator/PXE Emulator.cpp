@@ -1,12 +1,18 @@
 // PXE Emulator.cpp : Defines the entry point for the application.
+// PXE Emulator rebuild in C++ inspired by @tova98 (https://pxe.nefal.world/)
 //
+
 #include "framework.h"
 #include "PXE Emulator.h"
+#include "pxe_engine.h"
 #include <commdlg.h>
+#include <fstream>
+#include <iostream>
+#include <vector>
+
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
-#include <iostream>
 
 #define MAX_LOADSTRING 100
 
@@ -15,11 +21,26 @@ HINSTANCE hInst;                                // current instance
 WCHAR szTitle[MAX_LOADSTRING];                  // The title bar text
 WCHAR szWindowClass[MAX_LOADSTRING];            // the main window class name
 
+std::unique_ptr<PXE::PXEEngine> g_pxeEngine;
+
 // Forward declarations of functions included in this code module:
 ATOM                MyRegisterClass(HINSTANCE hInstance);
 BOOL                InitInstance(HINSTANCE, int);
 LRESULT CALLBACK    WndProc(HWND, UINT, WPARAM, LPARAM);
 INT_PTR CALLBACK    About(HWND, UINT, WPARAM, LPARAM);
+
+static std::vector<uint8_t> ReadEntireFile(const char* filepath) {
+    std::ifstream file(filepath, std::ios::binary | std::ios::ate);
+    if (!file.is_open()) return {};
+    std::streamsize size = file.tellg();
+    file.seekg(0, std::ios::beg);
+    if (size <= 0) return {};
+    std::vector<uint8_t> buffer(static_cast<size_t>(size));
+    if (file.read(reinterpret_cast<char*>(buffer.data()), size)) {
+        return buffer;
+    }
+    return {};
+}
 
 int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
                      _In_opt_ HINSTANCE hPrevInstance,
@@ -29,7 +50,8 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
     UNREFERENCED_PARAMETER(hPrevInstance);
     UNREFERENCED_PARAMETER(lpCmdLine);
 
-    // TODO: Place code here.
+    // Initialize Global PXE Engine
+    g_pxeEngine = std::make_unique<PXE::PXEEngine>();
 
     // Initialize global strings
     LoadStringW(hInstance, IDS_APP_TITLE, szTitle, MAX_LOADSTRING);
@@ -54,18 +76,15 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
             TranslateMessage(&msg);
             DispatchMessage(&msg);
         }
+
+        if (g_pxeEngine && g_pxeEngine->isLoaded && !g_pxeEngine->isHalted()) {
+            g_pxeEngine->step(5000);
+        }
     }
 
     return (int) msg.wParam;
 }
 
-
-
-//
-//  FUNCTION: MyRegisterClass()
-//
-//  PURPOSE: Registers the window class.
-//
 ATOM MyRegisterClass(HINSTANCE hInstance)
 {
     WNDCLASSEXW wcex;
@@ -87,22 +106,16 @@ ATOM MyRegisterClass(HINSTANCE hInstance)
     return RegisterClassExW(&wcex);
 }
 
-//
-//   FUNCTION: InitInstance(HINSTANCE, int)
-//
-//   PURPOSE: Saves instance handle and creates main window
-//
-//   COMMENTS:
-//
-//        In this function, we save the instance handle in a global variable and
-//        create and display the main program window.
-//
 BOOL InitInstance(HINSTANCE hInstance, int nCmdShow)
 {
    hInst = hInstance; // Store instance handle in our global variable
 
+   // Screen size 240x400
+   RECT rc = { 0, 0, PXE::SCREEN_WIDTH * 2, PXE::SCREEN_HEIGHT * 2 };
+   AdjustWindowRect(&rc, WS_OVERLAPPEDWINDOW, TRUE);
+
    HWND hWnd = CreateWindowW(szWindowClass, szTitle, WS_OVERLAPPEDWINDOW,
-      CW_USEDEFAULT, 0, CW_USEDEFAULT, 0, nullptr, nullptr, hInstance, nullptr);
+      CW_USEDEFAULT, 0, rc.right - rc.left, rc.bottom - rc.top, nullptr, nullptr, hInstance, nullptr);
 
    if (!hWnd)
    {
@@ -115,16 +128,6 @@ BOOL InitInstance(HINSTANCE hInstance, int nCmdShow)
    return TRUE;
 }
 
-//
-//  FUNCTION: WndProc(HWND, UINT, WPARAM, LPARAM)
-//
-//  PURPOSE: Processes messages for the main window.
-//
-//  WM_COMMAND  - process the application menu
-//  WM_PAINT    - Paint the main window
-//  WM_DESTROY  - post a quit message and return
-//
-//
 LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
     switch (message)
@@ -132,7 +135,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
     case WM_COMMAND:
         {
             int wmId = LOWORD(wParam);
-            // Parse the menu selections:
             switch (wmId)
             {
             case IDM_ABOUT:
@@ -142,55 +144,97 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                 DestroyWindow(hWnd);
                 break;
             case IDM_OPENPXOFILE:
-                char filename[MAX_PATH];
-                OPENFILENAME ofn;
-                ZeroMemory(&filename, sizeof(filename));
-                ZeroMemory(&ofn, sizeof(ofn));
-                ofn.lStructSize = sizeof(ofn);
-                ofn.hwndOwner = NULL;  // If you have a window to center over, put its HANDLE here
-                ofn.lpstrFilter = "Text Files\0*.txt\0Any File\0*.*\0";
-                ofn.lpstrFile = filename;
-                ofn.nMaxFile = MAX_PATH;
-                ofn.lpstrTitle = "Select a File, yo!";
-                ofn.Flags = OFN_DONTADDTORECENT | OFN_FILEMUSTEXIST;
+                {
+                    char filename[MAX_PATH] = { 0 };
+                    OPENFILENAMEA ofn = { 0 };
+                    ofn.lStructSize = sizeof(ofn);
+                    ofn.hwndOwner = hWnd;
+                    ofn.lpstrFilter = "PXO Game Files (*.pxo)\0*.pxo\0All Files (*.*)\0*.*\0";
+                    ofn.lpstrFile = filename;
+                    ofn.nMaxFile = MAX_PATH;
+                    ofn.lpstrTitle = "Select LG Music World .pxo Game File";
+                    ofn.Flags = OFN_DONTADDTORECENT | OFN_FILEMUSTEXIST;
 
-                if (GetOpenFileNameA(&ofn))
-                {
-                    std::cout << "You chose the file \"" << filename << "\"\n";
-                }
-                else
-                {
-                    // All this stuff below is to tell you exactly how you messed up above. 
-                    // Once you've got that fixed, you can often (not always!) reduce it to a 'user cancelled' assumption.
-                    switch (CommDlgExtendedError())
+                    if (GetOpenFileNameA(&ofn))
                     {
-                    case CDERR_DIALOGFAILURE: std::cout << "CDERR_DIALOGFAILURE\n";   break;
-                    case CDERR_FINDRESFAILURE: std::cout << "CDERR_FINDRESFAILURE\n";  break;
-                    case CDERR_INITIALIZATION: std::cout << "CDERR_INITIALIZATION\n";  break;
-                    case CDERR_LOADRESFAILURE: std::cout << "CDERR_LOADRESFAILURE\n";  break;
-                    case CDERR_LOADSTRFAILURE: std::cout << "CDERR_LOADSTRFAILURE\n";  break;
-                    case CDERR_LOCKRESFAILURE: std::cout << "CDERR_LOCKRESFAILURE\n";  break;
-                    case CDERR_MEMALLOCFAILURE: std::cout << "CDERR_MEMALLOCFAILURE\n"; break;
-                    case CDERR_MEMLOCKFAILURE: std::cout << "CDERR_MEMLOCKFAILURE\n";  break;
-                    case CDERR_NOHINSTANCE: std::cout << "CDERR_NOHINSTANCE\n";     break;
-                    case CDERR_NOHOOK: std::cout << "CDERR_NOHOOK\n";          break;
-                    case CDERR_NOTEMPLATE: std::cout << "CDERR_NOTEMPLATE\n";      break;
-                    case CDERR_STRUCTSIZE: std::cout << "CDERR_STRUCTSIZE\n";      break;
-                    case FNERR_BUFFERTOOSMALL: std::cout << "FNERR_BUFFERTOOSMALL\n";  break;
-                    case FNERR_INVALIDFILENAME: std::cout << "FNERR_INVALIDFILENAME\n"; break;
-                    case FNERR_SUBCLASSFAILURE: std::cout << "FNERR_SUBCLASSFAILURE\n"; break;
-                    default: std::cout << "You cancelled.\n";
+                        std::vector<uint8_t> bytes = ReadEntireFile(filename);
+                        if (g_pxeEngine && g_pxeEngine->loadPXOFile(bytes)) {
+                            MessageBoxA(hWnd, "Successfully loaded PXO file!", "PXE Emulator", MB_OK | MB_ICONINFORMATION);
+                            InvalidateRect(hWnd, nullptr, TRUE);
+                        } else {
+                            MessageBoxA(hWnd, "Failed to load PXO file.", "PXE Emulator Error", MB_OK | MB_ICONERROR);
+                        }
+                    }
+                }
+                break;
+            case IDM_OPENFLSFILE:
+                {
+                    char filename[MAX_PATH] = { 0 };
+                    OPENFILENAMEA ofn = { 0 };
+                    ofn.lStructSize = sizeof(ofn);
+                    ofn.hwndOwner = hWnd;
+                    ofn.lpstrFilter = "FLS Firmware / Kernel Files (*.fls)\0*.fls\0All Files (*.*)\0*.*\0";
+                    ofn.lpstrFile = filename;
+                    ofn.nMaxFile = MAX_PATH;
+                    ofn.lpstrTitle = "Select FLS Kernel or Executable File";
+                    ofn.Flags = OFN_DONTADDTORECENT | OFN_FILEMUSTEXIST;
+
+                    if (GetOpenFileNameA(&ofn))
+                    {
+                        std::vector<uint8_t> bytes = ReadEntireFile(filename);
+                        if (g_pxeEngine && g_pxeEngine->loadFLSFile(bytes)) {
+                            MessageBoxA(hWnd, "Successfully loaded FLS Kernel/Executable!", "PXE Emulator", MB_OK | MB_ICONINFORMATION);
+                            InvalidateRect(hWnd, nullptr, TRUE);
+                        } else {
+                            MessageBoxA(hWnd, "Failed to load FLS file.", "PXE Emulator Error", MB_OK | MB_ICONERROR);
+                        }
                     }
                 }
                 break;
             }
         }
         break;
+    case WM_LBUTTONDOWN:
+    case WM_MOUSEMOVE:
+    case WM_LBUTTONUP:
+        if (g_pxeEngine) {
+            int x = LOWORD(lParam) / 2;
+            int y = HIWORD(lParam) / 2;
+            int action = (message == WM_LBUTTONDOWN) ? 0 : ((message == WM_MOUSEMOVE) ? 1 : 2);
+            g_pxeEngine->sendTouchEvent(x, y, action);
+        }
+        break;
     case WM_PAINT:
         {
             PAINTSTRUCT ps;
             HDC hdc = BeginPaint(hWnd, &ps);
-            // TODO: Add any drawing code that uses hdc here...
+
+            RECT rect;
+            GetClientRect(hWnd, &rect);
+
+            // Draw PXE Engine frame buffer canvas
+            HDC memDC = CreateCompatibleDC(hdc);
+            HBITMAP hBitmap = CreateCompatibleBitmap(hdc, PXE::SCREEN_WIDTH, PXE::SCREEN_HEIGHT);
+            HBITMAP hOldBmp = (HBITMAP)SelectObject(memDC, hBitmap);
+
+            if (g_pxeEngine) {
+                BITMAPINFO bmi = { 0 };
+                bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+                bmi.bmiHeader.biWidth = PXE::SCREEN_WIDTH;
+                bmi.bmiHeader.biHeight = -PXE::SCREEN_HEIGHT; // Top-down
+                bmi.bmiHeader.biPlanes = 1;
+                bmi.bmiHeader.biBitCount = 32;
+                bmi.bmiHeader.biCompression = BI_RGB;
+
+                SetDIBits(memDC, hBitmap, 0, PXE::SCREEN_HEIGHT, g_pxeEngine->frameBuffer.data(), &bmi, DIB_RGB_COLORS);
+            }
+
+            StretchBlt(hdc, 0, 0, rect.right, rect.bottom, memDC, 0, 0, PXE::SCREEN_WIDTH, PXE::SCREEN_HEIGHT, SRCCOPY);
+
+            SelectObject(memDC, hOldBmp);
+            DeleteObject(hBitmap);
+            DeleteDC(memDC);
+
             EndPaint(hWnd, &ps);
         }
         break;
@@ -203,13 +247,14 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
     return 0;
 }
 
-// Message handler for about box.
+// Message handler for about box giving credit to @tova98
 INT_PTR CALLBACK About(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam)
 {
     UNREFERENCED_PARAMETER(lParam);
     switch (message)
     {
     case WM_INITDIALOG:
+        SetDlgItemTextA(hDlg, IDC_STATIC, "PXE Emulator C++ Edition\nBased on PXE Emulator by @tova98 (https://pxe.nefal.world/)\nSupports .pxo files and .fls kernel loader.");
         return (INT_PTR)TRUE;
 
     case WM_COMMAND:
